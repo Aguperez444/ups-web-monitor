@@ -6,10 +6,12 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node tests/ups-proxy.test.mjs"
   },
   "dependencies": {
-    "next": "16.0.3",
+    "chart.js": "3.9.1",
+    "next": "16.1.0-canary.19",
     "react": "19.2.0",
     "react-dom": "19.2.0"
   },
