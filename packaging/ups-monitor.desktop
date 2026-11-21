@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=UPS Monitor
+GenericName=Monitor de UPS
+Comment=Monitor web de UPS (NUT) con ícono en bandeja e historial SQLite persistente
+Exec=AppRun
+Icon=ups-monitor
+Terminal=false
+Categories=System;Monitor;
+Keywords=UPS;NUT;Battery;Power;Monitor;
+StartupNotify=false
