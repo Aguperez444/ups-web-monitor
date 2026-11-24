@@ -1,36 +1,29 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Dashboard UPS Monitor
 
-## Getting Started
+Dashboard Next.js con vistas de flujo eléctrico, información e historial. La lectura actual se consulta dos segundos después de cada respuesta. Si NUT deja de responder, el dashboard marca la última lectura como desactualizada. Los gráficos de intervalos relativos se actualizan cada diez segundos mientras la vista está abierta.
 
-First, run the development server:
+## Ejecutar
 
-```bash
+Iniciá primero el [backend](../backend/README.md). Desde `frontend/`:
+
+```sh
+npm ci
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Abrí el dashboard en el puerto `3000`. Copiá `.env.example` a `.env.local` y modificá `UPS_API_URL` si tu backend usa otro host o puerto. La dirección se interpreta desde el servidor de Next.js.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+El navegador consulta `/api/ups/current` y `/api/metrics` en el mismo origen. El proxy de Next.js mantiene `/api/ups/summary` para compatibilidad, reenvía las consultas sin caché y devuelve el código HTTP y detalle JSON del backend. Un 502 indica que el backend no respondió correctamente y un 504 indica tiempo de espera vencido.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Los gráficos de Chart.js usan las muestras y los timestamps que devuelve la API. El selector solicita al backend el intervalo elegido. El eje y los tooltips muestran la hora local del navegador. En un gráfico enfocado podés usar las flechas izquierda y derecha para consultar muestras con el teclado.
 
-## Learn More
+## Verificación
 
-To learn more about Next.js, take a look at the following resources:
+```sh
+npm run lint
+npm test
+npx tsc --noEmit
+npm run build
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Si el entorno restringe los sockets internos de Turbopack, podés compilar con `npm run build -- --webpack`.

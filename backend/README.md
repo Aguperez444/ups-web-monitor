@@ -1,175 +1,65 @@
-# UPS Monitor
+# Backend de UPS Monitor
 
-**UPS Monitor** es un proyecto open-source para monitorear un UPS (Uninterruptible Power Supply) usando [Network UPS Tools (NUT)](https://networkupstools.org/), exponiendo los datos a través de una API en **FastAPI** y un frontend moderno en **NextJS**.
+## Arquitectura
 
-La idea es simple:
+| Capa | Responsabilidad |
+| --- | --- |
+| `ups_monitor/domain` | Telemetría, muestras, modos y puertos de lectura y persistencia. |
+| `ups_monitor/application` | Lectura actual, captura, consulta de historial, retención y ciclo periódico. |
+| `ups_monitor/infrastructure` | Adaptadores para `upsc` y SQLite, y configuración por variables de entorno. |
+| `ups_monitor/presentation` | Composición de dependencias, ciclo de vida de FastAPI, rutas y esquemas HTTP. |
 
-- NUT se encarga de hablar con el UPS (USB/HID/serial, drivers, etc.)
-- El backend en Python + FastAPI lee los datos desde `upsc`
-- El frontend en NextJS muestra toda la información con una interfaz prolija y agradable
+`python run.py` desde `backend/` conserva el arranque anterior en el puerto `5601`. Desde la raíz también podés ejecutar `uvicorn backend.main:app --host 0.0.0.0 --port 5601`. Usá un proceso de Uvicorn por UPS y base para evitar muestreadores redundantes.
 
----
+## Configuración
 
-## ✨ Características (plan / estado)
+| Variable de entorno | Predeterminado | Descripción |
+| --- | --- | --- |
+| `UPS_NAME` | `ups@localhost` | Identificador que recibe `upsc`, por ejemplo `rack@servidor-nut`. |
+| `UPS_DB_PATH` | `backend/data/ups.sqlite3` | Archivo SQLite. Una ruta relativa se interpreta desde el directorio de ejecución. |
+| `UPS_UPSC_TIMEOUT_SECONDS` | `3` | Límite por invocación de `upsc`. |
+| `UPS_SAMPLE_INTERVAL_SECONDS` | `10` | Segundos de espera entre ciclos de muestreo. |
+| `UPS_RETENTION_HOURS` | `720` (30 días) | Horas de historial consultable. |
+| `UPS_CLEANUP_INTERVAL_SECONDS` | `60` | Cadencia de limpieza, comprobada en cada ciclo. |
+| `UPS_FRONTEND_DIST` | *(vacío)* | Directorio del export estático del frontend para servirlo desde FastAPI en `/`. |
 
-- ✅ Lectura de datos del UPS via `upsc` (NUT)
-- ✅ API REST en FastAPI
-  - `GET /ups/raw` → salida completa de `upsc` en JSON
-  - `GET /ups/summary` → resumen amigable (voltajes, carga, estado, etc.)
-- ⏳ Frontend en NextJS (dashboard web con gráficos y estado en tiempo real)
-- ⏳ Logs históricos (guardar métricas para análisis)
-- ⏳ Alertas (cuando se corta la luz, batería baja, etc.)
+El cliente `upsc` debe estar en el `PATH` del backend. Para diagnosticar el equipo, ejecutá `upsc "$UPS_NAME"` con el mismo identificador que usa la API. La lectura actual consulta NUT directamente. El muestreador captura desde el arranque en un hilo de trabajo, registra los errores y vuelve a intentar en el siguiente ciclo. La limpieza también se ejecuta si NUT falla.
 
----
+## API
 
-## 🧱 Arquitectura
+Swagger está disponible en `/docs`.
+
+| Operación | Contrato |
+| --- | --- |
+| `GET /api/ups/current` | Estado en vivo, timestamp UTC, modo, identificador, datos de equipo y cargador cuando NUT los informa. Devuelve HTTP 503 si falla la lectura o la telemetría es inutilizable. |
+| `GET /api/metrics` | Rango solicitado, intervalo nominal de muestreo, tamaño de bucket si hubo reducción y muestras en orden cronológico. Consulta SQLite aunque NUT esté caído. |
+| `GET /ups/raw` | Mapa de variables que devuelve `upsc`. |
+| `GET /ups/summary` | Resumen anterior con sus campos de telemetría y el mapa `raw`. |
+| `GET /saludo` | Respuesta de compatibilidad `{"chao":"mundo"}`. |
+
+El historial acepta `start` y `end` en ISO 8601 con zona horaria. Ambos extremos son inclusivos. También acepta `window_minutes` en lugar de `start` para consultar un intervalo relativo a `end`. Si se omite `end`, se usa la hora actual. El rango predeterminado es de una hora. `max_points` acepta de 3 a 5000 y vale 600 por defecto.
 
 ```text
-UPS (USB/HID/serial)
-        │
-        │  (drivers)
-        ▼
-      NUT (upsd + drivers)
-        │
-        │  `upsc ups@localhost`
-        ▼
-  FastAPI backend (Python)
-        │
-        │  JSON / HTTP
-        ▼
-  NextJS frontend (React)
-
+GET /api/metrics?window_minutes=15
+GET /api/metrics?window_minutes=600&max_points=300
+GET /api/metrics?start=2026-11-23T12:00:00Z&end=2026-11-23T14:00:00Z
 ```
 
-  🔧 Requisitos
+Un rango válido que no contiene datos devuelve `samples: []`. La retención se aplica a la consulta incluso entre limpiezas. La reducción conserva la primera y la última muestra y selecciona una muestra real de cada bucket temporal interior. Un pico breve puede quedar entre las muestras seleccionadas. Para revisarlo, pedí un intervalo más corto o aumentá `max_points`.
 
-Linux con NUT instalado y configurado
+## SQLite y disponibilidad de métricas
 
-Ejemplo: upsc ups@localhost debe funcionar en consola
+`ups_samples` es una tabla ancha con clave primaria `(ups_name, timestamp_us)` e índice sobre `timestamp_us` para retención. Cada captura guarda el estado de NUT y las columnas nullable `input_voltage`, `output_voltage`, `output_frequency`, `load_percent`, `battery_voltage` y `battery_charge`. El timestamp usa microsegundos UTC desde la época de Unix y la API lo expone en ISO 8601. SQLite usa WAL. El modo se obtiene del estado almacenado al consultar.
 
-Python 3.10+ (recomendado)
+La disponibilidad depende del UPS y del driver. Por ejemplo, NUT puede no publicar `output.frequency`, o puede publicar `battery.charge` sin `battery.voltage`. Los valores ausentes o inválidos quedan en `null`. El cero se conserva cuando es un valor real. Se descartan capturas sin telemetría utilizable y el estado transitorio `WAIT`. El flujo en vivo se basa en los indicadores de [estado de NUT](https://networkupstools.org/docs/developer-guide.chunked/new-drivers.html) y del [cargador](https://networkupstools.org/docs/developer-guide.chunked/_variables.html). El esquema de conversión es conceptual, ya que el driver puede no identificar la topología interna.
 
-Node.js 18+ (para el frontend con NextJS, cuando lo agregues)
+## Pruebas
 
-🚀 Backend (FastAPI)
-1. Instalación
+Desde la raíz y con el entorno Python activado:
 
-Desde la carpeta backend/:
+```sh
+pip install -r backend/requirements-dev.txt
+python -m unittest discover -s backend/tests -v
+```
 
-cd backend
-python3 -m venv venv
-source venv/bin/activate   # en Linux
-pip install -r requirements.txt
-
-
-Si todavía no generaste requirements.txt, podés hacerlo con:
-
-pip install fastapi uvicorn[standard]
-pip freeze > requirements.txt
-
-2. Configuración
-
-Por defecto, el backend asume que tu UPS está configurado en NUT como:
-
-[ups]
-    driver = nutdrv_qx
-    port = auto
-    # ...
-
-
-y que upsc ups@localhost devuelve datos válidos.
-
-Si tu nombre en ups.conf es otro, editá UPS_NAME en backend/main.py.
-
-3. Ejecutar el backend
-cd backend
-source venv/bin/activate
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
-
-
-Endpoints disponibles:
-
-Documentación automática:
-http://localhost:8000/docs
-
-Datos RAW:
-GET http://localhost:8000/ups/raw
-
-Resumen amigable:
-GET http://localhost:8000/ups/summary
-
-Ejemplo de respuesta de /ups/summary:
-
-{
-  "status": "OL TRIM",
-  "load_percent": 24.0,
-  "input_voltage": 245.6,
-  "output_voltage": 210.0,
-  "battery_charge": 100.0,
-  "battery_voltage": 27.1,
-  "output_frequency": 50.1,
-  "raw": {
-    "battery.charge": "100",
-    "battery.voltage": "27.1",
-    "input.voltage": "245.6",
-    "ups.status": "OL TRIM",
-    "...": "..."
-  }
-}
-
-🌐 Frontend (NextJS)
-
-⚠️ Todavía en construcción.
-
-La idea es crear un dashboard en NextJS que consuma http://localhost:8000/ups/summary y muestre:
-
-Estado del UPS (OL, OB, LB, TRIM, BOOST, etc.)
-
-Voltaje de entrada/salida
-
-Carga (%)
-
-Nivel de batería
-
-Gráficos en tiempo real / semi-tiempo real
-
-Creación inicial sugerida:
-
-cd ups-monitor
-npx create-next-app@latest frontend
-
-
-Luego, dentro de frontend, consumir la API del backend.
-
-🧪 Roadmap / Ideas
-
- Historial de métricas (guardar en SQLite/Postgres)
-
- Gráficos de voltaje / carga vs tiempo
-
- Alertas configurables (Telegram/Discord/e-mail)
-
- Soporte para múltiples UPS
-
- Docker Compose (backend + frontend + NUT opcional)
-
-🤝 Contribuciones
-
-Contribuciones, issues y PRs son bienvenidos.
-Si querés sumar soporte para otros modelos de UPS, nuevos gráficos o integraciones (Home Assistant, por ejemplo), adelante.
-
-📜 Licencia
-
-Este proyecto está bajo la licencia MIT.
-Consultá el archivo LICENSE para más detalles.
-
-
----
-
-## 3. Archivos del backend
-
-### `backend/requirements.txt` (mínimo)
-
-```text
-fastapi
-uvicorn[standard]
+Las pruebas ejercitan las rutas y su ciclo de vida, el parser de NUT, el muestreador y SQLite con una base temporal. No requieren conectar un UPS.

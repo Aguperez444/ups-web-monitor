@@ -1,184 +1,71 @@
-# 📦 UPS Monitor
+# UPS Monitor
 
-**Monitoreo moderno y open-source para tu UPS usando NUT, FastAPI y
-NextJS**
+Monitor web de un UPS mediante Network UPS Tools (NUT), FastAPI y Next.js. Muestra lecturas en vivo, el flujo de alimentación y hasta 30 días de historial persistente en SQLite por defecto.
 
-UPS Monitor es una herramienta open-source que permite obtener
-información en tiempo real de un UPS (Uninterruptible Power Supply) a
-través de **Network UPS Tools (NUT)**, exponiendo una API en **FastAPI**
-y un dashboard web moderno en **NextJS**.
+- **Flujo eléctrico** muestra la entrada, la salida, la batería y el modo que reporta NUT.
+- **Información UPS** reúne los indicadores de capacidad y carga con cuatro secciones de lectura que se pueden abrir juntas.
+- **Historial** compara cinco métricas en gráficos independientes. Permite elegir las métricas y consultar intervalos de 15 minutos a 7 días, o fechas personalizadas dentro de la ventana de retención.
 
-------------------------------------------------------------------------
+## Versión de producción (AppImage con bandeja del sistema)
 
-## 🚀 Funcionalidades
+Podés compilar un único archivo portable `dist/UPS-Monitor-x86_64.AppImage` autocontenido (Python + FastAPI + PyQt6 + dashboard estático en un solo proceso):
 
-### **Backend (FastAPI)**
-
--   ✅ Lectura del UPS mediante `upsc` (NUT)
--   ✅ API REST:
-    -   `GET /ups/raw` → salida completa de `upsc`
-    -   `GET /ups/summary` → datos procesados (estado, voltajes, carga,
-        etc.)
--   ⏳ Logs históricos en base de datos
--   ⏳ Alertas (corte eléctrico, batería baja, variaciones de voltaje)
-
-### **Frontend (NextJS)**
-
--   ⏳ Dashboard moderno con:
-    -   Estado del UPS
-    -   Gráficos en tiempo real
-    -   Voltajes de entrada/salida
-    -   Nivel de batería y carga
-
-------------------------------------------------------------------------
-
-## 🧩 Arquitectura General
-
-``` text
-UPS (USB / HID / Serial)
-        │
-        ▼
-      NUT (upsd + drivers)
-        │  → upsc ups@localhost
-        ▼
-    FastAPI (Python)
-        │  → JSON / HTTP
-        ▼
-    NextJS (React)
+```sh
+./packaging/build_appimage.sh
 ```
 
-------------------------------------------------------------------------
+Al ejecutar `./dist/UPS-Monitor-x86_64.AppImage`:
 
-## 🔧 Requisitos
+- Se inicia el servidor web y el muestreador de NUT en segundo plano y aparece un ícono de batería/energía en la bandeja del sistema (KDE Plasma / Wayland / X11).
+- **Click izquierdo** en el ícono abre el dashboard en el navegador predeterminado (`http://127.0.0.1:5601`).
+- **Click derecho** muestra el estado en vivo, permite activar/desactivar **Iniciar con el sistema** (`~/.config/autostart/ups-monitor.desktop`), abrir la carpeta de datos o editar `~/.config/ups-monitor/config.env`.
+- La base de datos SQLite se guarda de forma persistente en `~/.local/share/ups-monitor/ups.sqlite3` (con retención de 30 días por defecto y checkpoint WAL al cerrar) para conservar los registros al cerrar la app o reiniciar la PC.
 
--   Linux con **NUT** correctamente configurado\
-    (ejemplo: `upsc ups@localhost` debe funcionar)
--   Python **3.10+**
--   Node.js **18+** (para el frontend)
--   Acceso al dispositivo del UPS (USB/HID/serial)
+## Inicio rápido (desarrollo)
 
-------------------------------------------------------------------------
+Necesitás NUT instalado y configurado en el equipo que accede al UPS. Desde el equipo del backend, verificá que el cliente pueda leerlo.
 
-# 🐍 Backend --- FastAPI
+```sh
+upsc ups@localhost
+```
 
-## 1️⃣ Instalación
+Desde la raíz del proyecto, con Python 3.10 o posterior:
 
-``` bash
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r backend/requirements.txt
 cd backend
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+python run.py
 ```
 
-Si aún no generaste el archivo:
+Desde otra terminal, con Node.js 20.9 o posterior:
 
-``` bash
-pip install fastapi uvicorn[standard]
-pip freeze > requirements.txt
+```sh
+cd frontend
+npm ci
+npm run dev
 ```
 
-------------------------------------------------------------------------
+Abrí el dashboard en el puerto `3000`. La API escucha en el puerto `5601` y Swagger se sirve en `/docs`. Si usás un nombre de UPS distinto, definí `UPS_NAME` antes de iniciar el backend.
 
-## 2️⃣ Configuración
+El navegador consulta Next.js en el mismo origen. Configurá `UPS_API_URL` en `frontend/.env.local` si Next.js debe conectarse a otro host o puerto.
 
-``` ini
-[ups]
-    driver = nutdrv_qx
-    port = auto
+## Arquitectura
+
+```text
+UPS → NUT (driver y upsd) → upsc → adaptador NutSource
+                                          │
+                                 puertos del dominio
+                                          │
+                                  casos de uso Monitor
+                                     │            │
+                              SQLiteSampleStore   FastAPI ← proxy Next.js ← dashboard
 ```
 
-Si tu UPS se llama distinto, modificá `UPS_NAME` en `backend/main.py`.
+El dominio usa tipos de Python. Los casos de uso dependen de los puertos de lectura y persistencia. FastAPI inyecta el monitor, configura el muestreador en su ciclo de vida y traduce lecturas y muestras a esquemas HTTP.
 
-------------------------------------------------------------------------
+- [Backend, API, persistencia y configuración](backend/README.md)
+- [Frontend, proxy y verificación](frontend/README.md)
 
-## 3️⃣ Ejecutar el backend
-
-``` bash
-cd backend
-source venv/bin/activate
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
-```
-
-### 📚 Documentación automática
-
-http://localhost:8000/docs
-
-------------------------------------------------------------------------
-
-## 📡 Endpoints principales
-
-### **RAW completo**
-
-`GET /ups/raw`
-
-### **Resumen amigable**
-
-`GET /ups/summary`
-
-#### Ejemplo:
-
-``` json
-{
-  "status": "OL TRIM",
-  "load_percent": 24.0,
-  "input_voltage": 245.6,
-  "output_voltage": 210.0,
-  "battery_charge": 100.0,
-  "battery_voltage": 27.1,
-  "output_frequency": 50.1,
-  "raw": {
-    "battery.charge": "100",
-    "battery.voltage": "27.1",
-    "input.voltage": "245.6",
-    "ups.status": "OL TRIM"
-  }
-}
-```
-
-------------------------------------------------------------------------
-
-# 🌐 Frontend --- NextJS
-
-⚠️ En desarrollo.
-
-### Creación inicial:
-
-``` bash
-cd ups-monitor
-npx create-next-app@latest frontend
-```
-
-Luego consumir:
-
-`http://localhost:8000/ups/summary`
-
-------------------------------------------------------------------------
-
-# 🧪 Roadmap
-
--   [ ] Historial y métricas (SQLite/Postgres)\
--   [ ] Gráficos de carga y voltaje\
--   [ ] Alertas via Telegram / Discord / Email\
--   [ ] Soporte multi-UPS\
--   [ ] Docker Compose (NUT + backend + frontend)
-
-------------------------------------------------------------------------
-
-# 🤝 Contribuir
-
-Contribuciones abiertas.\
-Se aceptan mejoras de API, UI, integraciones externas y soporte para más
-modelos de UPS.
-
-------------------------------------------------------------------------
-
-# 📄 Licencia
-
-Licencia **MIT** (ver archivo LICENSE).
-
-------------------------------------------------------------------------
-
-## 📁 Requisitos del backend
-
-    fastapi
-    uvicorn[standard]
+Licencia MIT. Ver [LICENSE](LICENSE).
