@@ -21,6 +21,13 @@ Al ejecutar `./dist/UPS-Monitor-x86_64.AppImage`:
 - **Click derecho** muestra el estado en vivo, permite activar/desactivar **Iniciar con el sistema** (`~/.config/autostart/ups-monitor.desktop`), abrir la carpeta de datos o editar `~/.config/ups-monitor/config.env`.
 - La base de datos SQLite se guarda de forma persistente en `~/.local/share/ups-monitor/ups.sqlite3` (con retención de 30 días por defecto y checkpoint WAL al cerrar) para conservar los registros al cerrar la app o reiniciar la PC.
 
+Para publicar un release automático en GitHub Actions con el `.AppImage` y su checksum `SHA256SUMS.txt`, creá y subí un tag `v*`:
+
+```sh
+git tag v1.0.0
+git push origin v1.0.0
+```
+
 ## Inicio rápido (desarrollo)
 
 Necesitás NUT instalado y configurado en el equipo que accede al UPS. Desde el equipo del backend, verificá que el cliente pueda leerlo.

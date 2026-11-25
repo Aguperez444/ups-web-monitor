@@ -9,3 +9,4 @@ frontend/.env.local
 frontend/*.tsbuildinfo
 build/
 dist/
+.directory/

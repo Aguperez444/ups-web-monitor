@@ -1,0 +1,104 @@
+name: Release AppImage
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build & Publish AppImage (x86_64)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Linux packaging & headless Qt libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            desktop-file-utils \
+            librsvg2-bin \
+            libdbus-1-3 \
+            libegl1 \
+            libgl1 \
+            libxkbcommon0
+
+      - name: Run backend tests
+        run: |
+          uv run --python 3.12 \
+            --with-requirements backend/requirements.txt \
+            --with-requirements backend/requirements-dev.txt \
+            python -m unittest discover -s backend/tests -v
+
+      - name: Install frontend dependencies and run checks
+        working-directory: frontend
+        run: |
+          npm ci
+          npm test
+          npm run lint
+          npx tsc --noEmit
+
+      - name: Build AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          chmod +x packaging/build_appimage.sh
+          ./packaging/build_appimage.sh
+
+      - name: Smoke-test generated AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          QT_QPA_PLATFORM: offscreen
+          UPS_PORT: "15601"
+        run: |
+          TMP_DIR="$(mktemp -d)"
+          UPS_DB_PATH="$TMP_DIR/ups.sqlite3" ./dist/UPS-Monitor-x86_64.AppImage --smoke-test
+          test -f "$TMP_DIR/ups.sqlite3"
+          rm -rf "$TMP_DIR"
+
+      - name: Generate SHA-256 checksum
+        working-directory: dist
+        run: sha256sum UPS-Monitor-x86_64.AppImage > SHA256SUMS.txt
+
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: UPS-Monitor-x86_64-AppImage
+          path: |
+            dist/UPS-Monitor-x86_64.AppImage
+            dist/SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              dist/UPS-Monitor-x86_64.AppImage \
+              dist/SHA256SUMS.txt \
+              --clobber
+          else
+            gh release create "$TAG" \
+              dist/UPS-Monitor-x86_64.AppImage \
+              dist/SHA256SUMS.txt \
+              --title "UPS Monitor $TAG" \
+              --generate-notes
+          fi
