@@ -6,6 +6,10 @@ on:
       - "v*"
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -90,15 +94,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" \
-              dist/UPS-Monitor-x86_64.AppImage \
-              dist/SHA256SUMS.txt \
-              --clobber
-          else
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
-              dist/UPS-Monitor-x86_64.AppImage \
-              dist/SHA256SUMS.txt \
               --title "UPS Monitor $TAG" \
               --generate-notes
           fi
+
+          for file in dist/UPS-Monitor-x86_64.AppImage dist/SHA256SUMS.txt; do
+            asset_name="$(basename "$file")"
+            for attempt in 1 2 3; do
+              if gh release upload "$TAG" "$file" --clobber; then
+                break
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                exit 1
+              fi
+              gh release delete-asset "$TAG" "$asset_name" --yes >/dev/null 2>&1 || true
+              sleep 5
+            done
+          done
