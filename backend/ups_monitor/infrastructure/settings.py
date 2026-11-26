@@ -1,5 +1,6 @@
 import math
 import os
+import shlex
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -7,6 +8,9 @@ from pathlib import Path
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "ups.sqlite3"
 DEFAULT_RETENTION_HOURS = 24 * 30  # 30 days
+DEFAULT_STALE_RECOVERY_COOLDOWN_SECONDS = 60.0
+DEFAULT_STALE_RECOVERY_TIMEOUT_SECONDS = 15.0
+DEFAULT_STALE_RECOVERY_RETRY_DELAY_SECONDS = 1.5
 
 
 def default_user_db_path() -> Path:
@@ -22,6 +26,38 @@ def _positive_env(name: str, default: float) -> float:
     return value
 
 
+def _non_negative_env(name: str, default: float) -> float:
+    value = float(os.environ.get(name, str(default)))
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{name} debe ser un número finito mayor o igual que cero.")
+    return value
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    normalized = raw.strip().casefold()
+    if normalized in {"1", "true", "yes", "on", "si", "sí"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} debe ser true o false.")
+
+
+def _command_env(name: str) -> tuple[str, ...] | None:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        parts = tuple(shlex.split(raw))
+    except ValueError as error:
+        raise ValueError(f"{name} tiene una sintaxis de comando inválida: {error}") from error
+    if not parts:
+        return None
+    return parts
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     ups_name: str = "ups@localhost"
@@ -31,6 +67,11 @@ class Settings:
     retention: timedelta = timedelta(hours=DEFAULT_RETENTION_HOURS)
     cleanup_interval_seconds: float = 60
     frontend_dist: Path | None = None
+    stale_recovery_enabled: bool = True
+    stale_recovery_command: tuple[str, ...] | None = None
+    stale_recovery_cooldown_seconds: float = DEFAULT_STALE_RECOVERY_COOLDOWN_SECONDS
+    stale_recovery_timeout_seconds: float = DEFAULT_STALE_RECOVERY_TIMEOUT_SECONDS
+    stale_recovery_retry_delay_seconds: float = DEFAULT_STALE_RECOVERY_RETRY_DELAY_SECONDS
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -50,4 +91,18 @@ class Settings:
             retention=retention,
             cleanup_interval_seconds=_positive_env("UPS_CLEANUP_INTERVAL_SECONDS", 60),
             frontend_dist=frontend_dist,
+            stale_recovery_enabled=_bool_env("UPS_STALE_RECOVERY_ENABLED", True),
+            stale_recovery_command=_command_env("UPS_STALE_RECOVERY_COMMAND"),
+            stale_recovery_cooldown_seconds=_non_negative_env(
+                "UPS_STALE_RECOVERY_COOLDOWN_SECONDS",
+                DEFAULT_STALE_RECOVERY_COOLDOWN_SECONDS,
+            ),
+            stale_recovery_timeout_seconds=_positive_env(
+                "UPS_STALE_RECOVERY_TIMEOUT_SECONDS",
+                DEFAULT_STALE_RECOVERY_TIMEOUT_SECONDS,
+            ),
+            stale_recovery_retry_delay_seconds=_non_negative_env(
+                "UPS_STALE_RECOVERY_RETRY_DELAY_SECONDS",
+                DEFAULT_STALE_RECOVERY_RETRY_DELAY_SECONDS,
+            ),
         )

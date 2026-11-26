@@ -1,7 +1,9 @@
 import asyncio
+import os
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from contextlib import closing
@@ -15,7 +17,12 @@ from backend.ups_monitor.application.monitor import InvalidHistoryRange, Monitor
 from backend.ups_monitor.application.sampler import sample_periodically
 from backend.ups_monitor.domain.ports import SourceUnavailable
 from backend.ups_monitor.domain.telemetry import ChargerState, Mode, Sample, Telemetry
-from backend.ups_monitor.infrastructure.nut import NutSource, parse_reading
+from backend.ups_monitor.infrastructure.nut import (
+    NutSource,
+    StaleDataRecovery,
+    default_stale_recovery_commands,
+    parse_reading,
+)
 from backend.ups_monitor.infrastructure.settings import Settings
 from backend.ups_monitor.infrastructure.sqlite_store import SQLiteSampleStore
 from backend.ups_monitor.presentation.app import create_app
@@ -96,6 +103,191 @@ class NutTests(unittest.TestCase):
                 run.side_effect = error
                 with self.assertRaisesRegex(SourceUnavailable, detail):
                     NutSource("ups@localhost", 1).read()
+
+    def test_default_stale_recovery_commands_match_local_targets_only(self):
+        self.assertEqual(
+            default_stale_recovery_commands("ups@localhost", is_root=False),
+            (
+                ("sudo", "-n", "systemctl", "restart", "nut-driver@ups.service", "nut-server.service"),
+                ("systemctl", "--no-ask-password", "restart", "nut-driver@ups.service", "nut-server.service"),
+            ),
+        )
+        self.assertEqual(
+            default_stale_recovery_commands("myups@127.0.0.1:3493", is_root=True),
+            (("systemctl", "--no-ask-password", "restart", "nut-driver@myups.service", "nut-server.service"),),
+        )
+        self.assertEqual(
+            default_stale_recovery_commands("ups@[::1]:3493", is_root=False)[0],
+            ("sudo", "-n", "systemctl", "restart", "nut-driver@ups.service", "nut-server.service"),
+        )
+        self.assertEqual(default_stale_recovery_commands("rack@192.168.1.10", is_root=False), ())
+
+    @patch("backend.ups_monitor.infrastructure.nut.subprocess.run")
+    def test_restarts_nut_and_retries_reading_on_data_stale(self, run):
+        slept: list[float] = []
+        now = [100.0]
+        recovery = StaleDataRecovery(
+            default_stale_recovery_commands("ups@localhost", is_root=False),
+            cooldown_seconds=60.0,
+            timeout_seconds=15.0,
+            retry_delay_seconds=1.5,
+            monotonic=lambda: now[0],
+            sleep=slept.append,
+        )
+        run.side_effect = [
+            subprocess.CalledProcessError(1, ["upsc", "ups@localhost"], stderr="Error: Data stale\n"),
+            subprocess.CompletedProcess(["sudo"], 0, stdout="", stderr=""),
+            subprocess.CompletedProcess(["upsc", "ups@localhost"], 0, stdout=NUT_OUTPUT, stderr=""),
+        ]
+
+        reading = NutSource("ups@localhost", 3, stale_recovery=recovery).read()
+
+        self.assertEqual(reading.sample.telemetry.input_voltage, 231.4)
+        self.assertEqual(slept, [1.5])
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            ["sudo", "-n", "systemctl", "restart", "nut-driver@ups.service", "nut-server.service"],
+        )
+
+    @patch("backend.ups_monitor.infrastructure.nut.subprocess.run")
+    def test_stale_recovery_respects_cooldown_and_ignores_non_stale_errors(self, run):
+        now = [100.0]
+        recovery = StaleDataRecovery(
+            (("sudo", "-n", "systemctl", "restart", "nut-driver@ups.service", "nut-server.service"),),
+            cooldown_seconds=60.0,
+            retry_delay_seconds=0.0,
+            monotonic=lambda: now[0],
+            sleep=lambda _: None,
+        )
+        source = NutSource("ups@localhost", 3, stale_recovery=recovery)
+
+        # Non-stale error must not trigger recovery.
+        run.side_effect = [
+            subprocess.CalledProcessError(1, ["upsc"], stderr="Error: Driver not connected"),
+        ]
+        with self.assertRaisesRegex(SourceUnavailable, "Driver not connected"):
+            source.read()
+        self.assertEqual(run.call_count, 1)
+
+        # First stale error triggers restart; retry still fails -> raises without looping.
+        run.reset_mock()
+        run.side_effect = [
+            subprocess.CalledProcessError(1, ["upsc"], stderr="Error: Data stale"),
+            subprocess.CompletedProcess(["sudo"], 0, stdout="", stderr=""),
+            subprocess.CalledProcessError(1, ["upsc"], stderr="Error: Data stale"),
+        ]
+        with self.assertRaisesRegex(SourceUnavailable, "Data stale"):
+            source.read()
+        self.assertEqual(run.call_count, 3)
+
+        # Within cooldown (30s later) -> no restart attempt.
+        now[0] = 130.0
+        run.reset_mock()
+        run.side_effect = [
+            subprocess.CalledProcessError(1, ["upsc"], stderr="Error: Data stale"),
+        ]
+        with self.assertRaisesRegex(SourceUnavailable, "Data stale"):
+            source.read()
+        self.assertEqual(run.call_count, 1)
+
+        # After cooldown (61s after previous attempt) -> restarts again and recovers.
+        now[0] = 161.0
+        run.reset_mock()
+        run.side_effect = [
+            subprocess.CalledProcessError(1, ["upsc"], stderr="Error: Data stale"),
+            subprocess.CompletedProcess(["sudo"], 0, stdout="", stderr=""),
+            subprocess.CompletedProcess(["upsc"], 0, stdout=NUT_OUTPUT, stderr=""),
+        ]
+        reading = source.read()
+        self.assertEqual(reading.sample.telemetry.status, "OL TRIM")
+        self.assertEqual(run.call_count, 3)
+
+    @patch("backend.ups_monitor.infrastructure.nut.subprocess.run")
+    def test_stale_recovery_falls_back_to_systemctl_when_sudo_needs_password(self, run):
+        recovery = StaleDataRecovery(
+            default_stale_recovery_commands("ups@localhost", is_root=False),
+            retry_delay_seconds=0.0,
+            sleep=lambda _: None,
+        )
+        run.side_effect = [
+            subprocess.CalledProcessError(1, ["upsc"], stderr="Error: Data stale"),
+            subprocess.CalledProcessError(1, ["sudo"], stderr="sudo: a password is required"),
+            subprocess.CompletedProcess(["systemctl"], 0, stdout="", stderr=""),
+            subprocess.CompletedProcess(["upsc"], 0, stdout=NUT_OUTPUT, stderr=""),
+        ]
+
+        reading = NutSource("ups@localhost", 3, stale_recovery=recovery).read()
+
+        self.assertEqual(reading.sample.telemetry.output_voltage, 230.0)
+        self.assertEqual(
+            run.call_args_list[2].args[0],
+            ["systemctl", "--no-ask-password", "restart", "nut-driver@ups.service", "nut-server.service"],
+        )
+
+    @patch("backend.ups_monitor.infrastructure.nut.subprocess.run")
+    def test_stale_recovery_skips_concurrent_duplicate_restarts(self, run):
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_restart(*_args, **_kwargs):
+            started.set()
+            release.wait(timeout=2)
+            return subprocess.CompletedProcess(["sudo"], 0, stdout="", stderr="")
+
+        run.side_effect = slow_restart
+        recovery = StaleDataRecovery(
+            (("sudo", "-n", "systemctl", "restart", "nut-driver@ups.service", "nut-server.service"),),
+            retry_delay_seconds=0.0,
+            sleep=lambda _: None,
+        )
+
+        results: list[bool] = []
+        worker = threading.Thread(target=lambda: results.append(recovery.recover("Error: Data stale")))
+        worker.start()
+        self.assertTrue(started.wait(timeout=2))
+        self.assertFalse(recovery.recover("Error: Data stale"))
+        release.set()
+        worker.join(timeout=2)
+
+        self.assertEqual(results, [True])
+        self.assertEqual(run.call_count, 1)
+
+    def test_settings_and_create_app_wire_stale_recovery(self):
+        env = {
+            "UPS_NAME": "ups@localhost",
+            "UPS_STALE_RECOVERY_ENABLED": "true",
+            "UPS_STALE_RECOVERY_COMMAND": "sudo -n systemctl restart nut-driver@ups.service nut-server.service",
+            "UPS_STALE_RECOVERY_COOLDOWN_SECONDS": "45",
+            "UPS_STALE_RECOVERY_TIMEOUT_SECONDS": "12",
+            "UPS_STALE_RECOVERY_RETRY_DELAY_SECONDS": "2",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            settings = Settings.from_env()
+        self.assertTrue(settings.stale_recovery_enabled)
+        self.assertEqual(
+            settings.stale_recovery_command,
+            ("sudo", "-n", "systemctl", "restart", "nut-driver@ups.service", "nut-server.service"),
+        )
+        self.assertEqual(settings.stale_recovery_cooldown_seconds, 45.0)
+        self.assertEqual(settings.stale_recovery_timeout_seconds, 12.0)
+        self.assertEqual(settings.stale_recovery_retry_delay_seconds, 2.0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            app_enabled = create_app(Settings(ups_name="ups@localhost", db_path=Path(directory) / "a.db"))
+            self.assertIsNotNone(app_enabled.state.monitor.source.stale_recovery)
+
+            app_disabled = create_app(
+                Settings(
+                    ups_name="ups@localhost",
+                    db_path=Path(directory) / "b.db",
+                    stale_recovery_enabled=False,
+                )
+            )
+            self.assertIsNone(app_disabled.state.monitor.source.stale_recovery)
+
+            app_remote = create_app(Settings(ups_name="rack@192.168.1.20", db_path=Path(directory) / "c.db"))
+            self.assertIsNone(app_remote.state.monitor.source.stale_recovery)
 
 
 class MonitorTests(unittest.TestCase):

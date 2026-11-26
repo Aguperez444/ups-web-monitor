@@ -58,6 +58,52 @@ Abrí el dashboard en el puerto `3000`. La API escucha en el puerto `5601` y Swa
 
 El navegador consulta Next.js en el mismo origen. Configurá `UPS_API_URL` en `frontend/.env.local` si Next.js debe conectarse a otro host o puerto.
 
+## Solución al error `Data stale` de NUT
+
+Si `upsc` devuelve `Error: Data stale` en un UPS local (por ejemplo `ups@localhost`), el backend detecta el error y ejecuta automáticamente:
+
+```sh
+sudo -n systemctl restart nut-driver@ups.service nut-server.service
+```
+
+Luego espera brevemente (`1.5 s` por defecto) y reintenta la lectura. Para evitar reinicios duplicados o en bucle, aplica un bloqueo concurrente y un período de enfriamiento de `60 s` entre intentos. Si `sudo -n` requiere contraseña, también prueba `systemctl --no-ask-password restart ...` (útil con reglas de `polkit`).
+
+### Configurar permiso sin contraseña (`sudoers`)
+
+Como el backend corre sin terminal interactiva, necesitás habilitar `NOPASSWD` solo para reiniciar esos dos servicios de NUT:
+
+```sh
+sudo visudo -f /etc/sudoers.d/ups-monitor-nut
+```
+
+Agregá esta línea (reemplazando `<tu-usuario>` por tu usuario de Linux, y `ups` si tu UPS en NUT tiene otro nombre):
+
+```text
+<tu-usuario> ALL=(root) NOPASSWD: /usr/bin/systemctl restart nut-driver@ups.service nut-server.service
+```
+
+Verificá que funcione sin pedir contraseña:
+
+```sh
+sudo -n systemctl restart nut-driver@ups.service nut-server.service
+```
+
+Si preferís usar `polkit` en lugar de `sudoers`, podés crear `/etc/polkit-1/rules.d/50-ups-monitor-nut.rules`:
+
+```javascript
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        subject.user == "<tu-usuario>" &&
+        action.lookup("verb") == "restart" &&
+        (action.lookup("unit") == "nut-driver@ups.service" ||
+         action.lookup("unit") == "nut-server.service")) {
+        return polkit.Result.YES;
+    }
+});
+```
+
+Esta recuperación se puede personalizar o desactivar con `UPS_STALE_RECOVERY_ENABLED`, `UPS_STALE_RECOVERY_COMMAND`, `UPS_STALE_RECOVERY_COOLDOWN_SECONDS`, `UPS_STALE_RECOVERY_TIMEOUT_SECONDS` y `UPS_STALE_RECOVERY_RETRY_DELAY_SECONDS` (en entorno o en `~/.config/ups-monitor/config.env`).
+
 ## Arquitectura
 
 ```text

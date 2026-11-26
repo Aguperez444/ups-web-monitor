@@ -63,6 +63,13 @@ CONFIG_TEMPLATE = """# Configuración local de UPS Monitor (opcional)
 
 # Retención de historial en horas (por defecto: 720 = 30 días)
 # UPS_RETENTION_HOURS=720
+
+# Reinicio automático de NUT al detectar "Data stale" en upsc (por defecto: true)
+# UPS_STALE_RECOVERY_ENABLED=true
+# Comando personalizado de recuperación (opcional; por defecto reinicia nut-driver@<ups>.service y nut-server.service)
+# UPS_STALE_RECOVERY_COMMAND=sudo -n systemctl restart nut-driver@ups.service nut-server.service
+# Tiempo mínimo de espera entre reinicios automáticos en segundos (por defecto: 60)
+# UPS_STALE_RECOVERY_COOLDOWN_SECONDS=60
 """
 
 

@@ -22,8 +22,31 @@
 | `UPS_RETENTION_HOURS` | `720` (30 días) | Horas de historial consultable. |
 | `UPS_CLEANUP_INTERVAL_SECONDS` | `60` | Cadencia de limpieza, comprobada en cada ciclo. |
 | `UPS_FRONTEND_DIST` | *(vacío)* | Directorio del export estático del frontend para servirlo desde FastAPI en `/`. |
+| `UPS_STALE_RECOVERY_ENABLED` | `true` | Reinicia los servicios locales de NUT automáticamente si `upsc` devuelve `Data stale`. |
+| `UPS_STALE_RECOVERY_COMMAND` | *(automático)* | Comando personalizado de recuperación. Por defecto usa `sudo -n systemctl restart nut-driver@<ups>.service nut-server.service` (con respaldo `systemctl --no-ask-password`) para objetivos locales. |
+| `UPS_STALE_RECOVERY_COOLDOWN_SECONDS` | `60` | Segundos mínimos entre intentos automáticos de reinicio. |
+| `UPS_STALE_RECOVERY_TIMEOUT_SECONDS` | `15` | Tiempo máximo de espera del comando de reinicio. |
+| `UPS_STALE_RECOVERY_RETRY_DELAY_SECONDS` | `1.5` | Pausa tras reiniciar NUT antes de reintentar `upsc`. |
 
 El cliente `upsc` debe estar en el `PATH` del backend. Para diagnosticar el equipo, ejecutá `upsc "$UPS_NAME"` con el mismo identificador que usa la API. La lectura actual consulta NUT directamente. El muestreador captura desde el arranque en un hilo de trabajo, registra los errores y vuelve a intentar en el siguiente ciclo. La limpieza también se ejecuta si NUT falla.
+
+### Recuperación automática ante `Data stale`
+
+Cuando `upsc` falla con `Data stale` en un UPS local (por ejemplo `ups@localhost`), el backend ejecuta automáticamente `sudo -n systemctl restart nut-driver@<ups>.service nut-server.service` (con un período de enfriamiento de 60 s y bloqueo para evitar reinicios simultáneos) y reintenta la lectura tras una breve pausa.
+
+Para que el reinicio funcione sin pedir contraseña interactivamente, agregá una regla restringida en `sudoers` (con `sudo visudo -f /etc/sudoers.d/ups-monitor-nut`):
+
+```text
+<tu-usuario> ALL=(root) NOPASSWD: /usr/bin/systemctl restart nut-driver@ups.service nut-server.service
+```
+
+Podés comprobar que no pide clave con:
+
+```sh
+sudo -n systemctl restart nut-driver@ups.service nut-server.service
+```
+
+También podés habilitarlo con una regla de `polkit` (el backend prueba `systemctl --no-ask-password` si `sudo -n` requiere contraseña) o definir `UPS_STALE_RECOVERY_COMMAND` / desactivarlo con `UPS_STALE_RECOVERY_ENABLED=false`.
 
 ## API
 
